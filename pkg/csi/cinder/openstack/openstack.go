@@ -45,7 +45,7 @@ func AddExtraFlags(fs *pflag.FlagSet) {
 }
 
 type IOpenStack interface {
-	CreateVolume(name string, size int, vtype, availability string, snapshotID string, sourceVolID string, sourceBackupID string, tags map[string]string) (*volumes.Volume, error)
+	CreateVolume(*volumes.CreateOpts, volumes.SchedulerHintOptsBuilder) (*volumes.Volume, error)
 	DeleteVolume(volumeID string) error
 	AttachVolume(instanceID, volumeID string) (string, error)
 	ListVolumes(limit int, startingToken string) ([]volumes.Volume, string, error)
@@ -56,6 +56,7 @@ type IOpenStack interface {
 	GetAttachmentDiskPath(instanceID, volumeID string) (string, error)
 	GetVolume(volumeID string) (*volumes.Volume, error)
 	GetVolumesByName(name string) ([]volumes.Volume, error)
+	GetVolumeByName(name string) (*volumes.Volume, error)
 	CreateSnapshot(name, volID string, tags map[string]string) (*snapshots.Snapshot, error)
 	ListSnapshots(filters map[string]string) ([]snapshots.Snapshot, string, error)
 	DeleteSnapshot(snapID string) error
@@ -72,6 +73,7 @@ type IOpenStack interface {
 	GetMaxVolLimit() int64
 	GetMetadataOpts() metadata.Opts
 	GetBlockStorageOpts() BlockStorageOpts
+	ResolveVolumeListToUUIDs(volumes string) (string, error)
 }
 
 type OpenStack struct {
@@ -174,19 +176,24 @@ func CreateOpenStackProvider(cloudName string) (IOpenStack, error) {
 		return nil, err
 	}
 	logcfg(cfg)
-	_, cloudNameDefined := cfg.Global[cloudName]
-	if !cloudNameDefined {
+	global := cfg.Global[cloudName]
+	if global == nil {
 		return nil, fmt.Errorf("GetConfigFromFiles cloud name \"%s\" not found in configuration files: %s", cloudName, configFiles)
 	}
 
-	provider, err := client.NewOpenStackClient(cfg.Global[cloudName], "cinder-csi-plugin", userAgentData...)
+	// if no search order given, use default
+	if len(cfg.Metadata.SearchOrder) == 0 {
+		cfg.Metadata.SearchOrder = fmt.Sprintf("%s,%s", metadata.ConfigDriveID, metadata.MetadataID)
+	}
+
+	provider, err := client.NewOpenStackClient(global, "cinder-csi-plugin", userAgentData...)
 	if err != nil {
 		return nil, err
 	}
 
 	epOpts := gophercloud.EndpointOpts{
-		Region:       cfg.Global[cloudName].Region,
-		Availability: cfg.Global[cloudName].EndpointType,
+		Region:       global.Region,
+		Availability: global.EndpointType,
 	}
 
 	// Init Nova ServiceClient
@@ -199,11 +206,6 @@ func CreateOpenStackProvider(cloudName string) (IOpenStack, error) {
 	blockstorageclient, err := openstack.NewBlockStorageV3(provider, epOpts)
 	if err != nil {
 		return nil, err
-	}
-
-	// if no search order given, use default
-	if len(cfg.Metadata.SearchOrder) == 0 {
-		cfg.Metadata.SearchOrder = fmt.Sprintf("%s,%s", metadata.ConfigDriveID, metadata.MetadataID)
 	}
 
 	// Init OpenStack
